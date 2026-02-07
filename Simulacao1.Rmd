@@ -1,0 +1,529 @@
+---
+title: "Projeto Simulacao"
+output: html_document
+---
+```{r}
+Sys.setlocale(locale = "pt_BR.UTF-8")
+```
+# Simulação de Monte Carlo para Avaliação de uma Opção Call Europeia
+
+Parametrização
+```{r}
+S0 <- 1736       # <-- exemplo: preço atual da Rheinmetall AG (ver Yahoo Finance 29/10/25)
+r  <- 0.035      # taxa livre de risco (3.5%)
+T  <- 0.25       # 3 meses
+sigma <- 0.40    # volatilidade (assumida)
+```
+
+Definição das Strikes
+```{r}
+K_list <- c(1.1*S0, S0, 0.9*S0)   #OTM, ATM, ITM
+```
+
+```{r}
+N <- 1000000     # número de simulações (1 milhão é razoável)
+set.seed(12345)  # garante reprodutibilidade
+```
+
+Definição da Função Black-Scholes
+```{r}
+bs_call <- function(S0, K, r, sigma, T) {
+  d1 <- (log(S0/K) + (r + 0.5*sigma^2)*T) / (sigma*sqrt(T))
+  d2 <- d1 - sigma*sqrt(T)
+  C  <- S0*pnorm(d1) - K*exp(-r*T)*pnorm(d2)
+  return(C)
+}
+```
+
+# Simulação de Preços Futuros sob a Medida Neutra ao Risco
+
+Movimento Browniano Geométrico (GBM):
+```{r}
+sim_terminal_prices <- function(S0, r, sigma, T, N) {
+  Z  <- rnorm(N)
+  ST <- S0 * exp((r - 0.5*sigma^2)*T + sigma*sqrt(T)*Z)
+  return(ST)
+}
+```
+
+Monte Carlo Baseline
+```{r}
+mc_baseline <- function(S0, K, r, sigma, T, N) {
+  ST <- sim_terminal_prices(S0, r, sigma, T, N)
+  payoff <- pmax(ST - K, 0)            # payoff da call
+  discounted <- exp(-r*T) * payoff     # desconto a valor presente
+  est <- mean(discounted)              # média amostral = estimativa
+  se  <- sd(discounted)/sqrt(N)        # erro padrão
+  ci  <- est + c(-1,1)*qnorm(0.975)*se # intervalo de confiança 95%
+  return(list(est=est, se=se, ci=ci))
+}
+
+```
+
+Execução para cada strike 
+```{r}
+for (K in K_list) {
+  cat("\n-------------------------------------------\n")
+  cat("Strike K =", K, "\n")
+  cat("-------------------------------------------\n")
+  
+  # Valor teórico (Black–Scholes)
+  bs_price <- bs_call(S0, K, r, sigma, T)
+  cat("Preço analítico (Black–Scholes):", round(bs_price,4), "€\n")
+  
+  # Estimativa Monte Carlo baseline
+  mc_res <- mc_baseline(S0, K, r, sigma, T, N)
+  cat("Monte Carlo (baseline):", round(mc_res$est,4), "€ ±", 
+      round(mc_res$se,4), "\n")
+  cat("Intervalo 95%:", paste0("[", round(mc_res$ci[1],4), ", ", 
+                               round(mc_res$ci[2],4), "]"), "\n")
+  
+  # Comparação rápida
+  bias <- mc_res$est - bs_price
+  cat("Diferença (MC - BS):", round(bias,6), "\n")
+}
+
+```
+# Redução de variância
+
+## Antithetic Variates
+```{r}
+mc_antithetic <- function(S0, K, r, sigma, T, N) {
+  # Gerar N/2 normais e os seus opostos
+  Z <- rnorm(N/2)
+  Z_antithetic <- -Z
+  
+  # Combinar
+  Z_all <- c(Z, Z_antithetic)
+  
+  # Simular preços finais
+  ST <- S0 * exp((r - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z_all)
+  
+  # Calcular payoffs e desconto
+  payoff <- pmax(ST - K, 0)
+  discounted <- exp(-r * T) * payoff
+  
+  # Estimativa e erro padrão
+  est <- mean(discounted)
+  se  <- sd(discounted) / sqrt(N)
+  ci  <- est + c(-1, 1) * qnorm(0.975) * se
+  
+  return(list(est = est, se = se, ci = ci))
+}
+```
+
+## Control Variates
+```{r}
+mc_control_variate <- function(S0, K, r, sigma, T, N) {
+  # Simulação simples
+  Z <- rnorm(N)
+  ST <- S0 * exp((r - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z)
+  
+  # Payoff descontado (variável principal)
+  Y <- exp(-r * T) * pmax(ST - K, 0)
+  
+  # Variável de controlo: preço analítico Black-Scholes (constante)
+  C_BS <- bs_call(S0, K, r, sigma, T)
+  
+  # Control variate: payoff "simulado" de Black–Scholes (sem max)
+  X <- exp(-r * T) * (S0 * exp((r - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z) - K)
+  
+  # Calcular coeficiente ótimo b*
+  b_star <- cov(Y, X) / var(X)
+  
+  # Novo estimador com controlo
+  Y_cv <- Y - b_star * (X - mean(X))
+  est <- mean(Y_cv)
+  se  <- sd(Y_cv) / sqrt(N)
+  ci  <- est + c(-1, 1) * qnorm(0.975) * se
+  
+  return(list(est = est, se = se, ci = ci, b = b_star))
+}
+```
+
+## Importance Sampling
+```{r}
+mc_importance <- function(S0, K, r, sigma, T, N, mu_shift = 1.0) {
+  # Geração de amostras deslocadas (média > 0 para focar em S_T > K)
+  Z_shifted <- rnorm(N, mean = mu_shift, sd = 1)
+  
+  # Simulação de preços terminais com Z deslocado
+  ST <- S0 * exp((r - 0.5 * sigma^2) * T + sigma * sqrt(T) * Z_shifted)
+  
+  # Cálculo dos payoffs
+  payoff <- pmax(ST - K, 0)
+  
+  # Peso de correção (likelihood ratio)
+  weights <- exp(-mu_shift * Z_shifted + 0.5 * mu_shift^2)
+  
+  # Desconto e ponderação
+  discounted <- exp(-r * T) * payoff * weights
+  
+  # Estimativas
+  est <- mean(discounted)
+  se  <- sd(discounted) / sqrt(N)
+  ci  <- est + c(-1, 1) * qnorm(0.975) * se
+  
+  return(list(est = est, se = se, ci = ci))
+}
+```
+
+Resultados
+```{r}
+set.seed(12345)
+
+for (K in K_list) {
+  cat("\n-------------------------------------------\n")
+  cat("Strike K =", K, "\n")
+  cat("-------------------------------------------\n")
+  
+  bs_price <- bs_call(S0, K, r, sigma, T)
+  cat("Preço analítico (Black–Scholes):", round(bs_price, 4), "€\n")
+  
+  # Baseline
+  mc_base <- mc_baseline(S0, K, r, sigma, T, N)
+  cat("Monte Carlo baseline:", round(mc_base$est, 4), "€ ±", round(mc_base$se, 4), "\n")
+  
+  # Antithetic
+  mc_anti <- mc_antithetic(S0, K, r, sigma, T, N)
+  cat("Antithetic variates:", round(mc_anti$est, 4), "€ ±", round(mc_anti$se, 4), "\n")
+  
+  # Control variate
+  mc_cv <- mc_control_variate(S0, K, r, sigma, T, N)
+  cat("Control variates:", round(mc_cv$est, 4), "€ ±", round(mc_cv$se, 4), "\n")
+  
+  # Importance Sampling
+  mc_is <- mc_importance(S0, K, r, sigma, T, N, mu_shift = 1)
+  cat("Importance Sampling:", round(mc_is$est, 4), "€ ±", round(mc_is$se,4), "\n")
+  
+  # Comparação
+  cat("Redução de erro (Antithetic vs Baseline):", 
+      round(100 * (1 - (mc_anti$se / mc_base$se)), 2), "%\n")
+  cat("Redução de erro (Control Variate vs Baseline):", 
+      round(100 * (1 - (mc_cv$se / mc_base$se)), 2), "%\n")
+  cat("Redução de erro (Importance Sampling vs Baseline):", 
+      round(100 * (1 - (mc_is$se / mc_base$se)), 2), "%\n")
+}
+```
+
+Gráfico erros padrão dos métodos de redução de variância comparando com o Baseline
+```{r}
+library(ggplot2)
+
+results <- data.frame(
+  Strike = numeric(),
+  Metodo = character(),
+  Erro = numeric(),
+  stringsAsFactors = FALSE
+)
+for (K in K_list) {
+  bs_price <- bs_call(S0, K, r, sigma, T)
+  mc_base <- mc_baseline(S0, K, r, sigma, T, N)
+  mc_anti <- mc_antithetic(S0, K, r, sigma, T, N)
+  mc_cv   <- mc_control_variate(S0, K, r, sigma, T, N)
+  mc_is   <- mc_importance(S0, K, r, sigma, T, N, mu_shift = 1)
+  #guardar erros padrão de cada método
+  results <- rbind(results,
+                   data.frame(Strike = K, Metodo = "Baseline", Erro = mc_base$se),
+                   data.frame(Strike = K, Metodo = "Antithetic", Erro = mc_anti$se),
+                   data.frame(Strike = K, Metodo = "Control Variate", Erro = mc_cv$se),
+                   data.frame(Strike = K, Metodo = "Importance Sampling", Erro = mc_is$se)
+  )
+}
+
+results$Metodo <- factor(results$Metodo, 
+                         levels = c("Baseline", "Antithetic", "Control Variate", "Importance Sampling"))
+
+
+ggplot(results, aes(x = factor(round(Strike,1)), y = Erro, fill = Metodo)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(
+    title = "Comparação dos erros padrão (±) por método",
+    x = "Strike (K)",
+    y = "Erro padrão (±)",
+    fill = "Método"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "bottom"
+  )
+```
+
+# Intervalos de Confiança e Análise de Erro
+
+## Intervalos de Confiança a 95%
+
+Função para calcular IC's:
+```{r}
+IC_fuction <- function(S0, K, r, sigma, T, N) {
+  bs_price <- bs_call(S0, K, r, sigma, T)
+  
+  # Baseline
+  mc_base <- mc_baseline(S0, K, r, sigma, T, N)
+  
+  # Antithetic
+  mc_anti <- mc_antithetic(S0, K, r, sigma, T, N)
+  
+  # Control variate
+  mc_cv <- mc_control_variate(S0, K, r, sigma, T, N)
+  
+  # Importance Sampling
+  mc_is <- mc_importance(S0, K, r, sigma, T, N)
+  
+  # Calcular reduções de erro
+  reduction_anti <- 100 * (1 - (mc_anti$se / mc_base$se))
+  reduction_cv <- 100 * (1 - (mc_cv$se / mc_base$se))
+  reduction_is <- 100 * (1 - (mc_is$se / mc_base$se))
+  
+  return(list(
+    strike = K,
+    bs_price = bs_price,
+    baseline = list(est = mc_base$est, se = mc_base$se, ci = mc_base$ci),
+    antithetic = list(est = mc_anti$est, se = mc_anti$se, ci = mc_anti$ci),
+    control_variate = list(est = mc_cv$est, se = mc_cv$se, ci = mc_cv$ci),
+    importance = list(est = mc_is$est, se = mc_is$se, ci = mc_is$ci),
+    error_reduction = list(antithetic = reduction_anti, control_variate = reduction_cv, importance = reduction_is)
+  ))
+}
+```
+
+Calculo de IC's para cada strike:
+```{r}
+set.seed(12345)
+
+cat(paste0("\n", paste0(rep("=", 60), collapse = ""), "\n"))
+cat("INTERVALOS DE CONFIANÇA - 95%\n")
+cat(paste0(rep("=", 60), collapse = ""), "\n")
+
+for (K in K_list) {
+  results <- IC_fuction(S0, K, r, sigma, T, N)
+  
+  cat(paste0("\n", paste0(rep("-", 60), collapse = ""), "\n"))
+  strike_type <- ifelse(K > S0, "OTM", ifelse(K == S0, "ATM", "ITM"))
+  cat("STRIKE K =", K, "| Tipo:", strike_type, "\n")
+  cat(paste0(rep("-", 60), collapse = ""), "\n")
+  cat("Preço analítico (Black-Scholes):", round(results$bs_price, 4), "€\n\n")
+  
+  cat("BASELINE:\n")
+  cat("  Estimativa:", round(results$baseline$est, 4), "€\n")
+  cat("  Erro padrão:", round(results$baseline$se, 6), "\n")
+  cat("  IC 95%: [", round(results$baseline$ci[1], 4), ", ", 
+      round(results$baseline$ci[2], 4), "]\n")
+  cat("  Largura do IC:", round(diff(results$baseline$ci), 6), "\n\n")
+  
+  cat("ANTITHETIC VARIATES:\n")
+  cat("  Estimativa:", round(results$antithetic$est, 4), "€\n")
+  cat("  Erro padrão:", round(results$antithetic$se, 6), "\n")
+  cat("  IC 95%: [", round(results$antithetic$ci[1], 4), ", ", 
+      round(results$antithetic$ci[2], 4), "]\n")
+  cat("  Largura do IC:", round(diff(results$antithetic$ci), 6), "\n")
+  cat("  Redução de erro:", round(results$error_reduction$antithetic, 2), "%\n\n")
+  
+  cat("CONTROL VARIATES:\n")
+  cat("  Estimativa:", round(results$control_variate$est, 4), "€\n")
+  cat("  Erro padrão:", round(results$control_variate$se, 6), "\n")
+  cat("  IC 95%: [", round(results$control_variate$ci[1], 4), ", ", 
+      round(results$control_variate$ci[2], 4), "]\n")
+  cat("  Largura do IC:", round(diff(results$control_variate$ci), 6), "\n")
+  cat("  Redução de erro:", round(results$error_reduction$control_variate, 2), "%\n\n")
+  
+  cat("IMPORTANCE SAMPLING:\n")
+  cat("  Estimativa:", round(results$importance$est, 4), "€\n")
+  cat("  Erro padrão:", round(results$importance$se, 6), "\n")
+  cat("  IC 95%: [", round(results$importance$ci[1], 4), ", ", 
+      round(results$importance$ci[2], 4), "]\n")
+  cat("  Largura do IC:", round(diff(results$importance$ci), 6), "\n")
+  cat("  Redução de erro:", round(results$error_reduction$importance, 2), "%\n")
+}
+```
+
+## Convergência com N
+
+Grid de valores de N
+```{r}
+N_grid <- c(1000, 5000, 10000, 50000, 100000)
+```
+
+Função para estudar convergência
+```{r}
+convergencia_function <- function(S0, K, r, sigma, T, N_grid, method) {
+  estimates <- numeric(length(N_grid))
+  ci_widths <- numeric(length(N_grid))
+  standard_errors <- numeric(length(N_grid))
+  ci_lower <- numeric(length(N_grid))
+  ci_upper <- numeric(length(N_grid))
+  
+  for (i in 1:length(N_grid)) {
+    if (method == "baseline") {
+      result <- mc_baseline(S0, K, r, sigma, T, N_grid[i])
+    } else if (method == "antithetic") {
+      result <- mc_antithetic(S0, K, r, sigma, T, N_grid[i])
+    } else if (method == "control_variate") {
+      result <- mc_control_variate(S0, K, r, sigma, T, N_grid[i])
+    } else if (method == "importance") {
+      result <- mc_importance(S0, K, r, sigma, T, N_grid[i])
+    }
+    
+    estimates[i] <- result$est
+    ci_widths[i] <- diff(result$ci)
+    standard_errors[i] <- result$se
+    ci_lower[i] <- result$ci[1]
+    ci_upper[i] <- result$ci[2]
+  }
+  
+  return(list(
+    N = N_grid,
+    estimates = estimates,
+    ci_widths = ci_widths,
+    standard_errors = standard_errors,
+    ci_lower = ci_lower,
+    ci_upper = ci_upper
+  ))
+}
+```
+
+Estudo de convergência para ATM
+```{r}
+set.seed(12345)
+
+K_atm <- S0
+
+bs_atm <- bs_call(S0, K_atm, r, sigma, T)
+```
+
+Calcular convergência para cada método
+```{r}
+set.seed(12345)
+
+conv_base <- convergencia_function(S0, K_atm, r, sigma, T, N_grid, "baseline")
+conv_anti <- convergencia_function(S0, K_atm, r, sigma, T, N_grid, "antithetic")
+conv_cv <- convergencia_function(S0, K_atm, r, sigma, T, N_grid, "control_variate")
+conv_is <- convergencia_function(S0, K_atm, r, sigma, T, N_grid, "importance")
+```
+
+Resultados
+```{r}
+conv_results <- data.frame(
+  N = N_grid,
+  BS = rep(bs_atm, length(N_grid)),
+  Base_Est = conv_base$estimates,
+  Base_SE = conv_base$standard_errors,
+  Base_CI_Width = conv_base$ci_widths,
+  Anti_Est = conv_anti$estimates,
+  Anti_SE = conv_anti$standard_errors,
+  Anti_CI_Width = conv_anti$ci_widths,
+  CV_Est = conv_cv$estimates,
+  CV_SE = conv_cv$standard_errors,
+  CV_CI_Width = conv_cv$ci_widths,
+  IS_Est = conv_is$estimates,
+  IS_SE = conv_is$standard_errors,
+  IS_CI_Width = conv_is$ci_widths
+)
+
+print(conv_results, row.names = FALSE)
+```
+Calcular VR (Variance Reduction) para N máximo
+```{r}
+vr_anti <- 100 * (1 - (conv_anti$standard_errors[5] / conv_base$standard_errors[5]))
+vr_cv <- 100 * (1 - (conv_cv$standard_errors[5] / conv_base$standard_errors[5]))
+vr_is <- 100 * (1 - (conv_is$standard_errors[5] / conv_base$standard_errors[5]))
+```
+
+Gráfico de convergência com os três métodos separados
+```{r}
+if (require(ggplot2, quietly = TRUE)) {
+  df_plot <- data.frame(
+    N = rep(N_grid, 4),
+    Estimate = c(conv_base$estimates, conv_anti$estimates, conv_cv$estimates, conv_is$estimates),
+    Method = rep(c("Baseline", "Antithetic", "Control Variate", "Importance Sampling"), each = length(N_grid)),
+    SE = c(conv_base$standard_errors, conv_anti$standard_errors, conv_cv$standard_errors, conv_is$standard_errors),
+    CI_Lower = c(conv_base$ci_lower, conv_anti$ci_lower, conv_cv$ci_lower, conv_is$ci_lower),
+    CI_Upper = c(conv_base$ci_upper, conv_anti$ci_upper, conv_cv$ci_upper, conv_is$ci_upper)
+  )
+  
+  # Adicionar informações específicas para cada método
+  df_plot$Method_Label <- paste0(df_plot$Method, 
+                                "\nRedução VR: ", 
+                                ifelse(df_plot$Method == "Baseline", "0%",
+                                      ifelse(df_plot$Method == "Antithetic", 
+                                            paste0(round(vr_anti, 1), "%"),
+                                            paste0(round(vr_cv, 1), "%"))))
+  
+  # Criar o gráfico com facet_wrap - CADA MÉTODO NO SEU PRÓPRIO GRÁFICO
+  p <- ggplot(df_plot, aes(x = N, y = Estimate)) +
+    geom_line(aes(color = Method), size = 1) +
+    geom_point(aes(color = Method), size = 2) +
+    geom_ribbon(aes(ymin = CI_Lower, ymax = CI_Upper, fill = Method), 
+                alpha = 0.3) +
+    geom_hline(yintercept = bs_atm, linetype = "dashed", color = "red", size = 1) +
+    facet_wrap(~ Method_Label, ncol = 2) + 
+    scale_x_log10(breaks = N_grid, labels = scales::comma) +
+    scale_y_continuous(labels = scales::dollar_format(prefix = "€")) +
+    labs(
+      title = "Convergência do Preço da Opção Call Europeia - Comparação de Métodos",
+      subtitle = paste("Strike ATM K =", K_atm, "| Black-Scholes =", round(bs_atm, 4), "€"),
+      x = "Número de Simulações",
+      y = "Preço da Opção"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5),
+      strip.text = element_text(face = "bold", size = 11),
+      strip.background = element_rect(fill = "lightgray", color = "darkgray"),
+      panel.spacing = unit(1.5, "lines"),
+      legend.position = "none"  # Remove a legenda pois já temos os títulos nos facets
+    ) 
+  
+  print(p)
+  
+} else {
+  cat("\n(Para visualizar os gráficos de convergência, instale: install.packages('ggplot2'))\n")
+}
+```
+## Análise de Erro
+
+Calculo dos erros absolutos e relativos para cada N
+```{r}
+set.seed(12345)
+
+methods_list <- list(
+  Baseline   = conv_base,
+  Antithetic = conv_anti,
+  ControlVar = conv_cv,
+  Importance = conv_is
+)
+
+error_df <- do.call(rbind, lapply(names(methods_list), function(mn) {
+  conv <- methods_list[[mn]]
+  abs_err <- abs(conv$estimates - bs_atm)
+  rel_err <- abs_err / bs_atm
+  data.frame(Method = mn,
+             N = conv$N,
+             Estimate = conv$estimates,
+             AbsError = abs_err,
+             RelError = rel_err,
+             SE = conv$standard_errors,
+             stringsAsFactors = FALSE)
+}))
+
+print(error_df)
+```
+
+Resumo de Estatísticas
+```{r}
+error_summary <- do.call(rbind, lapply(split(error_df, error_df$Method), function(dfm) {
+  data.frame(
+    AbsError_mean = mean(dfm$AbsError),
+    AbsError_max  = max(dfm$AbsError),
+    AbsError_last = tail(dfm$AbsError, 1),
+    RelError_mean = mean(dfm$RelError),
+    RelError_max  = max(dfm$RelError),
+    RelError_last = tail(dfm$RelError, 1)
+  )
+}))
+
+print(error_summary)
+```
+
