@@ -1,5 +1,7 @@
 # Monte Carlo Simulation for European Call Option Pricing
 
+📄 **[View Full Report](https://stalinjesus31-netizen.github.io/monte-carlo-european-call-option/)**
+
 Pricing a European call option on **Rheinmetall AG (RHM.DE)** using Monte Carlo simulation under the risk-neutral measure, with comparison against the Black-Scholes analytical solution and implementation of three variance reduction techniques.
 
 ---
@@ -41,17 +43,24 @@ All methods converge to the Black-Scholes theoretical price, with deviations bel
 
 ```
 ├── monte_carlo_call_option.Rmd   # Full analysis: theory, simulation, results, plots
+├── index.html                    # Rendered report (served via GitHub Pages)
 ├── apresentacao.pdf              # Slides with theoretical framework (GBM, Black-Scholes)
 └── README.md
 ```
 
 ---
 
-## How to view the Report
+## How to Run
 
-## How to view the report
+1. Open `monte_carlo_call_option.Rmd` in RStudio
+2. Install dependencies if needed:
+```r
+install.packages(c("ggplot2", "scales", "knitr"))
+```
+3. Click **Knit** to render as HTML or PDF
 
-[Open the report](https://stalinjesus31-netizen.github.io/monte-carlo-european-call-option/monte_carlo_call_option.html)
+> Note: the simulation runs 1M paths per method. Chunks marked `cache=TRUE` will be cached after the first render.
+
 ---
 
 ## Topics
