@@ -49,7 +49,9 @@ All methods converge to the Black-Scholes theoretical price, with deviations bel
 
 ## How to view the Report
 
-https://stalinjesus31-netizen.github.io/monte-carlo-european-call-option/monte_carlo_call_option.html
+## How to view the report
+
+[Open the report](https://stalinjesus31-netizen.github.io/monte-carlo-european-call-option/monte_carlo_call_option.html)
 ---
 
 ## Topics
