@@ -47,17 +47,9 @@ All methods converge to the Black-Scholes theoretical price, with deviations bel
 
 ---
 
-## How to Run
+## How to view the Report
 
-1. Open `monte_carlo_call_option.Rmd` in RStudio
-2. Install dependencies if needed:
-```r
-install.packages(c("ggplot2", "scales", "knitr"))
-```
-3. Click **Knit** to render as HTML or PDF
-
-> Note: the simulation runs 1M paths per method. Chunks marked `cache=TRUE` will be cached after the first render.
-
+https://stalinjesus31-netizen.github.io/monte-carlo-european-call-option/monte_carlo_call_option.html
 ---
 
 ## Topics
